@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#101418"
+    android:fitsSystemWindows="true"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/status_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:text="Drive Recorder"
+        android:textColor="#F2F4F8"
+        android:textSize="14sp" />
+
+    <LinearLayout
+        android:id="@+id/playback_container"
+        android:layout_width="match_parent"
+        android:layout_height="180dp"
+        android:layout_marginTop="4dp"
+        android:background="#24313C"
+        android:orientation="vertical"
+        android:padding="2dp">
+
+        <TextView
+            android:id="@+id/playback_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#A0000000"
+            android:padding="3dp"
+            android:text="Playback Surface"
+            android:textColor="#F2F4F8"
+            android:textSize="12sp" />
+
+        <FrameLayout
+            android:id="@+id/playback_frame"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:background="#000000">
+
+            <TextureView
+                android:id="@+id/playback_surface"
+                android:layout_width="1dp"
+                android:layout_height="1dp"
+                android:layout_gravity="end|center_vertical"
+                android:alpha="0" />
+        </FrameLayout>
+    </LinearLayout>
+
+    <ListView
+        android:id="@+id/segment_list"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="4dp"
+        android:layout_weight="1"
+        android:background="#182028"
+        android:choiceMode="singleChoice" />
+
+    <TextView
+        android:id="@+id/empty_text"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="4dp"
+        android:layout_weight="1"
+        android:background="#182028"
+        android:gravity="center"
+        android:padding="16dp"
+        android:text="No MP4 segments found."
+        android:textColor="#C8D1DA"
+        android:textSize="14sp"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:id="@+id/action_row_navigation"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/refresh_button"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:minHeight="0dp"
+            android:padding="2dp"
+            android:text="Refresh"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/play_button"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:minHeight="0dp"
+            android:padding="2dp"
+            android:text="Play"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/search_recent_button"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:minHeight="0dp"
+            android:padding="2dp"
+            android:text="Recent 1h"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/action_row_primary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/protect_button"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:minHeight="0dp"
+            android:padding="2dp"
+            android:text="Protect"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/unprotect_button"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:minHeight="0dp"
+            android:padding="2dp"
+            android:text="Unprotect"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/delete_button"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:minHeight="0dp"
+            android:padding="2dp"
+            android:text="Delete"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/force_delete_button"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:minHeight="0dp"
+            android:padding="2dp"
+            android:text="Force Delete"
+            android:textSize="12sp" />
+    </LinearLayout>
+</LinearLayout>

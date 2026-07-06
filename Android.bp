@@ -1,0 +1,21 @@
+android_app {
+    name: "DriveRecorderApp",
+
+    srcs: [
+        "src/**/*.java",
+    ],
+
+    resource_dirs: [
+        "res",
+    ],
+
+    manifest: "AndroidManifest.xml",
+
+    certificate: "platform",
+    privileged: true,
+    platform_apis: true,
+
+    static_libs: [
+        "com.hailo.driverecorder-aidl-java",
+    ],
+}
