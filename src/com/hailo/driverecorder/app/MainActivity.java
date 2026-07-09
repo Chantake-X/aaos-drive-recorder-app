@@ -1,6 +1,9 @@
 package com.hailo.driverecorder.app;
 
 import android.app.Activity;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
 import android.graphics.SurfaceTexture;
 import android.media.MediaPlayer;
 import android.os.Bundle;
@@ -12,10 +15,15 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.Surface;
 import android.view.TextureView;
-import android.widget.ArrayAdapter;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.AbsListView;
+import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.FrameLayout;
-import android.widget.ListView;
+import android.widget.GridView;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.hailo.driverecorder.IDriveRecorderService;
@@ -25,14 +33,24 @@ import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final String TAG = "DriveRecorderApp";
     private static final String SERVICE_NAME = "hailo.driverecorder";
 
     private final ArrayList<SegmentItem> segmentItems = new ArrayList<>();
+    private final Map<String, Bitmap> thumbnailCache = new HashMap<>();
+    private final Set<String> thumbnailFailures = new HashSet<>();
+    private final Set<String> thumbnailLoading = new HashSet<>();
+    private final ExecutorService thumbnailExecutor = Executors.newFixedThreadPool(2);
 
     private TextView statusText;
     private TextView emptyText;
@@ -43,9 +61,9 @@ public final class MainActivity extends Activity {
     private Button deleteButton;
     private Button forceDeleteButton;
     private Button searchRecentButton;
-    private ListView segmentList;
+    private GridView segmentGrid;
     private TextureView playbackSurface;
-    private ArrayAdapter<SegmentItem> adapter;
+    private SegmentGridAdapter adapter;
 
     private IDriveRecorderService driveRecorderService;
     private VideoSegment selectedSegment;
@@ -54,6 +72,7 @@ public final class MainActivity extends Activity {
     private Surface playbackSurfaceOutput;
     private boolean surfaceReady;
     private boolean waitingForFirstFrame;
+    private boolean destroyed;
     private int videoWidth;
     private int videoHeight;
     private long playbackStartElapsedMs = -1;
@@ -72,20 +91,27 @@ public final class MainActivity extends Activity {
         deleteButton = findViewById(R.id.delete_button);
         forceDeleteButton = findViewById(R.id.force_delete_button);
         searchRecentButton = findViewById(R.id.search_recent_button);
-        segmentList = findViewById(R.id.segment_list);
+        segmentGrid = findViewById(R.id.segment_grid);
         playbackSurface = findViewById(R.id.playback_surface);
 
-        adapter = new ArrayAdapter<>(
-                this,
-                android.R.layout.simple_list_item_activated_1,
-                segmentItems);
-        segmentList.setAdapter(adapter);
-        segmentList.setEmptyView(emptyText);
-        segmentList.setOnItemClickListener((parent, view, position, id) -> {
+        adapter = new SegmentGridAdapter();
+        segmentGrid.setAdapter(adapter);
+        segmentGrid.setEmptyView(emptyText);
+        segmentGrid.setOnItemClickListener((parent, view, position, id) -> {
             SegmentItem item = segmentItems.get(position);
             selectedSegment = item.segment;
+            adapter.notifyDataSetChanged();
             updateActionButtons();
             setStatus("Selected: " + item.segment.fileName);
+            playSegment(item.segment);
+        });
+        segmentGrid.setOnItemLongClickListener((parent, view, position, id) -> {
+            SegmentItem item = segmentItems.get(position);
+            selectedSegment = item.segment;
+            adapter.notifyDataSetChanged();
+            updateActionButtons();
+            setStatus("Selected: " + item.segment.fileName);
+            return true;
         });
 
         playbackSurface.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
@@ -155,6 +181,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        destroyed = true;
+        thumbnailExecutor.shutdownNow();
         releasePlayer();
         releasePlaybackSurface();
         super.onDestroy();
@@ -267,6 +295,9 @@ public final class MainActivity extends Activity {
         selectedSegment = null;
         segmentItems.clear();
         segmentItems.addAll(items);
+        synchronized (thumbnailCache) {
+            thumbnailFailures.clear();
+        }
         adapter.notifyDataSetChanged();
         if (selectedFileName != null) {
             for (SegmentItem item : segmentItems) {
@@ -285,6 +316,111 @@ public final class MainActivity extends Activity {
             setEmptyMessage("");
             setStatus(label + ": " + items.size());
         }
+    }
+
+    private void loadThumbnail(String fileName, ImageView imageView, TextView placeholderText) {
+        if (fileName == null) {
+            showThumbnailPlaceholder(imageView, placeholderText, "null_fileName");
+            return;
+        }
+
+        Bitmap cached;
+        boolean knownFailure;
+        synchronized (thumbnailCache) {
+            cached = thumbnailCache.get(fileName);
+            knownFailure = thumbnailFailures.contains(fileName);
+            if (cached == null && !knownFailure && thumbnailLoading.contains(fileName)) {
+                showThumbnailPlaceholder(imageView, placeholderText, "loading");
+                return;
+            }
+        }
+        if (cached != null) {
+            placeholderText.setVisibility(View.GONE);
+            imageView.setImageBitmap(cached);
+            return;
+        }
+        if (knownFailure) {
+            showThumbnailPlaceholder(imageView, placeholderText, "cached_failure");
+            return;
+        }
+
+        showThumbnailPlaceholder(imageView, placeholderText, "loading");
+        synchronized (thumbnailCache) {
+            thumbnailLoading.add(fileName);
+        }
+        Log.d(TAG, "OPEN_THUMBNAIL_START fileName=" + fileName);
+        thumbnailExecutor.execute(() -> {
+            Bitmap bitmap = null;
+            ParcelFileDescriptor pfd = null;
+            String failureReason = null;
+            try {
+                if (destroyed) {
+                    return;
+                }
+                IDriveRecorderService service = ensureService();
+                if (service == null) {
+                    failureReason = "service_unavailable";
+                    return;
+                }
+                pfd = service.openThumbnail(fileName);
+                if (pfd == null || !pfd.getFileDescriptor().valid()) {
+                    failureReason = "invalid_pfd";
+                    return;
+                }
+
+                Log.d(TAG, "OPEN_THUMBNAIL_OK fileName=" + fileName);
+                bitmap = BitmapFactory.decodeFileDescriptor(pfd.getFileDescriptor());
+                if (bitmap == null) {
+                    failureReason = "decode_null";
+                    return;
+                }
+                synchronized (thumbnailCache) {
+                    thumbnailCache.put(fileName, bitmap);
+                }
+                Log.d(TAG, "THUMBNAIL_DECODE_OK fileName=" + fileName
+                        + " width=" + bitmap.getWidth()
+                        + " height=" + bitmap.getHeight());
+            } catch (Exception e) {
+                failureReason = e.getClass().getSimpleName() + ":" + e.getMessage();
+                Log.e(TAG, "OPEN_THUMBNAIL_FAILED fileName=" + fileName
+                        + " error=" + e.getMessage(), e);
+            } finally {
+                if (pfd != null) {
+                    closeQuietly(pfd, "thumbnail PFD");
+                }
+                if (bitmap == null) {
+                    synchronized (thumbnailCache) {
+                        thumbnailFailures.add(fileName);
+                    }
+                    Log.w(TAG, "THUMBNAIL_DECODE_FAILED fileName=" + fileName
+                            + " reason=" + failureReason);
+                }
+                synchronized (thumbnailCache) {
+                    thumbnailLoading.remove(fileName);
+                }
+            }
+
+            final Bitmap result = bitmap;
+            runOnUiThread(() -> {
+                if (destroyed || !fileName.equals(imageView.getTag())) {
+                    return;
+                }
+                if (result != null) {
+                    placeholderText.setVisibility(View.GONE);
+                    imageView.setImageBitmap(result);
+                } else {
+                    showThumbnailPlaceholder(imageView, placeholderText, "load_failed");
+                }
+            });
+        });
+    }
+
+    private void showThumbnailPlaceholder(
+            ImageView imageView, TextView placeholderText, String reason) {
+        imageView.setImageDrawable(null);
+        imageView.setBackgroundColor(Color.rgb(32, 43, 52));
+        placeholderText.setVisibility(View.VISIBLE);
+        Log.d(TAG, "THUMBNAIL_PLACEHOLDER reason=" + reason);
     }
 
     private void setSelectedSegmentProtected(boolean protectedFlag) {
@@ -590,6 +726,139 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private final class SegmentGridAdapter extends BaseAdapter {
+        @Override
+        public int getCount() {
+            return segmentItems.size();
+        }
+
+        @Override
+        public SegmentItem getItem(int position) {
+            return segmentItems.get(position);
+        }
+
+        @Override
+        public long getItemId(int position) {
+            return getItem(position).segment.segmentId;
+        }
+
+        @Override
+        public View getView(int position, View convertView, ViewGroup parent) {
+            ViewHolder holder;
+            if (convertView == null) {
+                holder = createGridItemView();
+                convertView = holder.root;
+                convertView.setTag(holder);
+            } else {
+                holder = (ViewHolder) convertView.getTag();
+            }
+
+            SegmentItem item = getItem(position);
+            String fileName = item.segment.fileName;
+            boolean selected = selectedSegment != null
+                    && fileName.equals(selectedSegment.fileName);
+            holder.root.setBackgroundColor(selected
+                    ? Color.rgb(63, 126, 166)
+                    : Color.rgb(24, 32, 40));
+            holder.imageView.setTag(fileName);
+            holder.titleText.setText(item.shortFileName());
+            holder.detailText.setText(item.detailText());
+            holder.badgeText.setVisibility(
+                    item.segment.protectedFlag ? View.VISIBLE : View.GONE);
+            loadThumbnail(fileName, holder.imageView, holder.placeholderText);
+            return convertView;
+        }
+
+        private ViewHolder createGridItemView() {
+            LinearLayout root = new LinearLayout(MainActivity.this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setPadding(dp(4), dp(4), dp(4), dp(4));
+            root.setLayoutParams(new AbsListView.LayoutParams(
+                    AbsListView.LayoutParams.MATCH_PARENT, dp(178)));
+
+            FrameLayout thumbnailFrame = new FrameLayout(MainActivity.this);
+            thumbnailFrame.setLayoutParams(new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(120)));
+            thumbnailFrame.setBackgroundColor(Color.rgb(32, 43, 52));
+
+            ImageView imageView = new ImageView(MainActivity.this);
+            imageView.setLayoutParams(new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT));
+            imageView.setAdjustViewBounds(false);
+            imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            thumbnailFrame.addView(imageView);
+
+            TextView placeholderText = new TextView(MainActivity.this);
+            placeholderText.setLayoutParams(new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT));
+            placeholderText.setGravity(Gravity.CENTER);
+            placeholderText.setText("No thumbnail");
+            placeholderText.setTextColor(Color.rgb(200, 209, 218));
+            placeholderText.setTextSize(12);
+            thumbnailFrame.addView(placeholderText);
+
+            TextView badgeText = new TextView(MainActivity.this);
+            FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.END);
+            badgeText.setLayoutParams(badgeParams);
+            badgeText.setBackgroundColor(Color.rgb(160, 0, 0));
+            badgeText.setPadding(dp(4), dp(1), dp(4), dp(1));
+            badgeText.setText("PROT");
+            badgeText.setTextColor(Color.WHITE);
+            badgeText.setTextSize(10);
+            thumbnailFrame.addView(badgeText);
+
+            TextView titleText = new TextView(MainActivity.this);
+            titleText.setLayoutParams(new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            titleText.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            titleText.setMaxLines(1);
+            titleText.setPadding(0, dp(3), 0, 0);
+            titleText.setTextColor(Color.rgb(242, 244, 248));
+            titleText.setTextSize(11);
+
+            TextView detailText = new TextView(MainActivity.this);
+            detailText.setLayoutParams(new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            detailText.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            detailText.setMaxLines(1);
+            detailText.setTextColor(Color.rgb(200, 209, 218));
+            detailText.setTextSize(10);
+
+            root.addView(thumbnailFrame);
+            root.addView(titleText);
+            root.addView(detailText);
+
+            ViewHolder holder = new ViewHolder();
+            holder.root = root;
+            holder.imageView = imageView;
+            holder.placeholderText = placeholderText;
+            holder.badgeText = badgeText;
+            holder.titleText = titleText;
+            holder.detailText = detailText;
+            return holder;
+        }
+    }
+
+    private static final class ViewHolder {
+        LinearLayout root;
+        ImageView imageView;
+        TextView placeholderText;
+        TextView badgeText;
+        TextView titleText;
+        TextView detailText;
+    }
+
     private static final class SegmentItem {
         private static final SimpleDateFormat DATE_FORMAT =
                 new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
@@ -598,6 +867,27 @@ public final class MainActivity extends Activity {
 
         SegmentItem(VideoSegment segment) {
             this.segment = segment;
+        }
+
+        String shortFileName() {
+            String name = segment.fileName;
+            if (name == null || name.length() <= 24) {
+                return name;
+            }
+            return name.substring(0, 12) + "..." + name.substring(name.length() - 9);
+        }
+
+        String detailText() {
+            StringBuilder builder = new StringBuilder();
+            if (segment.startEpochMs > 0) {
+                builder.append(DATE_FORMAT.format(new Date(segment.startEpochMs)));
+            } else {
+                builder.append(segment.sizeBytes).append("B");
+            }
+            if (segment.durationMs > 0) {
+                builder.append("  ").append(segment.durationMs).append("ms");
+            }
+            return builder.toString();
         }
 
         @Override
