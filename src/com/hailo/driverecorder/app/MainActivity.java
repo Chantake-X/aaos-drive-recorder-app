@@ -16,11 +16,11 @@ import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.Log;
+import android.util.LruCache;
 import android.view.Gravity;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
-import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
@@ -49,14 +49,22 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final String TAG = "DriveRecorderApp";
     private static final String SERVICE_NAME = "hailo.driverecorder";
-    private static final int GRID_COLUMN_COUNT = 3;
     private static final int SEEK_STEP_MS = 5_000;
     private static final int PLAYBACK_PROGRESS_INTERVAL_MS = 500;
+    private static final int THUMBNAIL_IMAGE_WIDTH_PX = 160;
+    private static final int THUMBNAIL_IMAGE_HEIGHT_PX = 120;
+    private static final int THUMBNAIL_ITEM_HORIZONTAL_SPACING_PX = 8;
+    private static final int THUMBNAIL_ITEM_VERTICAL_SPACING_PX = 10;
+    private static final int THUMBNAIL_OVERLAY_ICON_SIZE_PX = 22;
+    private static final int THUMBNAIL_TIME_OVERLAY_HEIGHT_PX = 22;
+    // 160x120 thumbnails are small, but a bounded cache avoids retaining every segment forever.
+    private static final int THUMBNAIL_CACHE_MAX_ENTRIES = 48;
 
     private final ArrayList<SegmentItem> allSegments = new ArrayList<>();
     private final ArrayList<SegmentItem> visibleSegments = new ArrayList<>();
-    private final Map<String, Bitmap> thumbnailCache = new HashMap<>();
-    private final Set<String> thumbnailFailures = new HashSet<>();
+    private final LruCache<String, Bitmap> thumbnailCache =
+            new LruCache<>(THUMBNAIL_CACHE_MAX_ENTRIES);
+    private final Map<String, ThumbnailPlaceholderState> thumbnailFailures = new HashMap<>();
     private final Set<String> thumbnailLoading = new HashSet<>();
     private final ExecutorService thumbnailExecutor = Executors.newFixedThreadPool(2);
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -95,12 +103,13 @@ public final class MainActivity extends Activity {
     private SegmentFilter currentFilter = SegmentFilter.ALL;
     private boolean surfaceReady;
     private boolean waitingForFirstFrame;
-    private boolean destroyed;
+    private volatile boolean destroyed;
     private boolean playerPrepared;
     private boolean userSeeking;
     private int videoWidth;
     private int videoHeight;
     private long playbackStartElapsedMs = -1;
+    private int lastSegmentScrollWidth = -1;
 
     private final Runnable playbackProgressRunnable = new Runnable() {
         @Override
@@ -133,6 +142,7 @@ public final class MainActivity extends Activity {
         destroyed = true;
         mainHandler.removeCallbacks(playbackProgressRunnable);
         thumbnailExecutor.shutdownNow();
+        clearThumbnailState();
         releasePlayer();
         releasePlaybackSurface();
         super.onDestroy();
@@ -171,6 +181,17 @@ public final class MainActivity extends Activity {
         segmentScroll = findViewById(R.id.segment_scroll);
         playbackSeek = findViewById(R.id.playback_seek);
         playbackSurface = findViewById(R.id.playback_surface);
+        segmentScroll.addOnLayoutChangeListener((view, left, top, right, bottom,
+                oldLeft, oldTop, oldRight, oldBottom) -> {
+            int width = right - left;
+            int oldWidth = oldRight - oldLeft;
+            if (width > 0 && width != oldWidth && width != lastSegmentScrollWidth
+                    && !visibleSegments.isEmpty()
+                    && segmentScroll.getVisibility() == View.VISIBLE) {
+                lastSegmentScrollWidth = width;
+                renderSegments();
+            }
+        });
     }
 
     private void setupButtons() {
@@ -326,9 +347,7 @@ public final class MainActivity extends Activity {
         String selectedFileName = selectedSegment != null ? selectedSegment.fileName : null;
         allSegments.clear();
         allSegments.addAll(items);
-        synchronized (thumbnailCache) {
-            thumbnailFailures.clear();
-        }
+        pruneThumbnailState(items);
         selectedSegment = null;
         if (selectedFileName != null) {
             for (SegmentItem item : allSegments) {
@@ -397,18 +416,28 @@ public final class MainActivity extends Activity {
 
         emptyText.setVisibility(View.GONE);
         segmentScroll.setVisibility(View.VISIBLE);
+        int availableWidth = getThumbnailListAvailableWidth();
+        if (availableWidth <= 0) {
+            segmentScroll.post(this::renderSegments);
+            return;
+        }
+
+        int columnCount = calculateThumbnailColumnCount(availableWidth);
         String currentDate = null;
         GridLayout currentGrid = null;
+        int sectionItemIndex = 0;
         for (SegmentItem item : visibleSegments) {
             String dateLabel = item.dateLabel();
             if (!dateLabel.equals(currentDate)) {
                 currentDate = dateLabel;
                 TextView header = createDateHeader(dateLabel);
                 segmentList.addView(header);
-                currentGrid = createSegmentGrid();
+                currentGrid = createSegmentGrid(columnCount, availableWidth, dateLabel);
                 segmentList.addView(currentGrid);
+                sectionItemIndex = 0;
             }
-            currentGrid.addView(createSegmentCard(item));
+            currentGrid.addView(createSegmentCard(item, sectionItemIndex, columnCount));
+            sectionItemIndex++;
         }
     }
 
@@ -426,23 +455,44 @@ public final class MainActivity extends Activity {
         return header;
     }
 
-    private GridLayout createSegmentGrid() {
+    private int getThumbnailListAvailableWidth() {
+        int width = segmentScroll.getWidth()
+                - segmentScroll.getPaddingLeft()
+                - segmentScroll.getPaddingRight();
+        if (width <= 0) {
+            width = segmentList.getWidth();
+        }
+        return width;
+    }
+
+    private static int calculateThumbnailColumnCount(int availableWidth) {
+        int itemWithSpacing = THUMBNAIL_IMAGE_WIDTH_PX + THUMBNAIL_ITEM_HORIZONTAL_SPACING_PX;
+        return Math.max(1,
+                (availableWidth + THUMBNAIL_ITEM_HORIZONTAL_SPACING_PX) / itemWithSpacing);
+    }
+
+    private GridLayout createSegmentGrid(int columnCount, int availableWidth, String dateLabel) {
         GridLayout grid = new GridLayout(this);
-        grid.setColumnCount(GRID_COLUMN_COUNT);
+        grid.setColumnCount(columnCount);
         grid.setUseDefaultMargins(false);
         grid.setAlignmentMode(GridLayout.ALIGN_BOUNDS);
         grid.setColumnOrderPreserved(false);
         grid.setLayoutParams(new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
+        Log.d(TAG, "DVR18_GRID_LAYOUT sectionDate=" + dateLabel
+                + " parentWidth=" + segmentScroll.getWidth()
+                + " availableWidth=" + availableWidth
+                + " thumbnailWidth=" + THUMBNAIL_IMAGE_WIDTH_PX
+                + " thumbnailHeight=" + THUMBNAIL_IMAGE_HEIGHT_PX
+                + " horizontalSpacing=" + THUMBNAIL_ITEM_HORIZONTAL_SPACING_PX
+                + " calculatedColumns=" + columnCount);
         return grid;
     }
 
-    private View createSegmentCard(SegmentItem item) {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(5), dp(5), dp(5), dp(5));
-        root.setBackground(createCardBackground(isSelected(item)));
+    private View createSegmentCard(SegmentItem item, int sectionItemIndex, int columnCount) {
+        FrameLayout root = new FrameLayout(this);
+        root.setForeground(createSelectionForeground(isSelected(item)));
         root.setClickable(true);
         root.setFocusable(true);
         root.setOnClickListener(view -> {
@@ -453,81 +503,87 @@ public final class MainActivity extends Activity {
         });
 
         GridLayout.LayoutParams params = new GridLayout.LayoutParams();
-        params.width = 0;
-        params.height = dp(170);
-        params.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
-        params.setMargins(dp(4), dp(4), dp(4), dp(6));
+        params.width = THUMBNAIL_IMAGE_WIDTH_PX;
+        params.height = THUMBNAIL_IMAGE_HEIGHT_PX;
+        params.setMargins(0, 0,
+                isLastColumn(sectionItemIndex, columnCount)
+                        ? 0 : THUMBNAIL_ITEM_HORIZONTAL_SPACING_PX,
+                THUMBNAIL_ITEM_VERTICAL_SPACING_PX);
         root.setLayoutParams(params);
-
-        FrameLayout thumbnailFrame = new FrameLayout(this);
-        thumbnailFrame.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        thumbnailFrame.setBackgroundColor(Color.rgb(32, 43, 52));
 
         ImageView imageView = new ImageView(this);
         imageView.setLayoutParams(new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT));
+                THUMBNAIL_IMAGE_WIDTH_PX,
+                THUMBNAIL_IMAGE_HEIGHT_PX));
+        imageView.setBackgroundColor(Color.rgb(32, 43, 52));
         imageView.setAdjustViewBounds(false);
-        imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        imageView.setScaleType(ImageView.ScaleType.CENTER);
         imageView.setTag(item.segment.fileName);
-        thumbnailFrame.addView(imageView);
+        imageView.setContentDescription("thumbnail " + item.timeLabel());
+        root.addView(imageView);
 
         TextView placeholderText = new TextView(this);
         placeholderText.setLayoutParams(new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
+        placeholderText.setBackgroundColor(Color.rgb(32, 43, 52));
         placeholderText.setGravity(Gravity.CENTER);
-        placeholderText.setText("No thumbnail");
         placeholderText.setTextColor(Color.rgb(200, 209, 218));
         placeholderText.setTextSize(12);
-        thumbnailFrame.addView(placeholderText);
-
-        TextView lockText = createOverlayText("🔒", Gravity.TOP | Gravity.END);
-        lockText.setVisibility(item.segment.protectedFlag ? View.VISIBLE : View.GONE);
-        thumbnailFrame.addView(lockText);
-
-        TextView checkText = createOverlayText("✓", Gravity.TOP | Gravity.START);
-        checkText.setVisibility(isSelected(item) ? View.VISIBLE : View.GONE);
-        thumbnailFrame.addView(checkText);
+        root.addView(placeholderText);
 
         TextView timeText = new TextView(this);
-        timeText.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+        FrameLayout.LayoutParams timeParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                THUMBNAIL_TIME_OVERLAY_HEIGHT_PX,
+                Gravity.BOTTOM);
+        timeText.setLayoutParams(timeParams);
         timeText.setEllipsize(TextUtils.TruncateAt.END);
         timeText.setGravity(Gravity.CENTER);
         timeText.setMaxLines(1);
-        timeText.setPadding(0, dp(4), 0, 0);
         timeText.setText(item.timeLabel());
-        timeText.setTextColor(Color.rgb(242, 244, 248));
-        timeText.setTextSize(13);
-
-        root.addView(thumbnailFrame);
+        timeText.setTextColor(Color.WHITE);
+        timeText.setTextSize(10);
+        timeText.setBackgroundColor(Color.argb(150, 0, 0, 0));
         root.addView(timeText);
+
+        TextView lockText = createOverlayText("🔒", Gravity.TOP | Gravity.END);
+        lockText.setVisibility(item.segment.protectedFlag ? View.VISIBLE : View.GONE);
+        root.addView(lockText);
+
+        TextView checkText = createOverlayText("✓", Gravity.TOP | Gravity.START);
+        checkText.setVisibility(isSelected(item) ? View.VISIBLE : View.GONE);
+        root.addView(checkText);
+
         loadThumbnail(item.segment.fileName, imageView, placeholderText);
         return root;
+    }
+
+    private static boolean isLastColumn(int sectionItemIndex, int columnCount) {
+        return (sectionItemIndex + 1) % columnCount == 0;
     }
 
     private TextView createOverlayText(String text, int gravity) {
         TextView view = new TextView(this);
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                dp(28), dp(28), gravity);
-        params.setMargins(dp(4), dp(4), dp(4), dp(4));
+                THUMBNAIL_OVERLAY_ICON_SIZE_PX, THUMBNAIL_OVERLAY_ICON_SIZE_PX, gravity);
+        params.setMargins(3, 3, 3, 3);
         view.setLayoutParams(params);
         view.setGravity(Gravity.CENTER);
         view.setText(text);
         view.setTextColor(Color.WHITE);
-        view.setTextSize(15);
-        view.setBackgroundColor(Color.rgb(46, 123, 239));
+        view.setTextSize(13);
+        view.setBackgroundColor(Color.argb(170, 24, 32, 40));
         return view;
     }
 
-    private GradientDrawable createCardBackground(boolean selected) {
+    private GradientDrawable createSelectionForeground(boolean selected) {
+        if (!selected) {
+            return null;
+        }
         GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(Color.rgb(24, 32, 40));
-        drawable.setStroke(dp(selected ? 3 : 1),
-                selected ? Color.rgb(46, 123, 239) : Color.rgb(48, 64, 77));
+        drawable.setColor(Color.TRANSPARENT);
+        drawable.setStroke(3, Color.rgb(46, 123, 239));
         return drawable;
     }
 
@@ -538,39 +594,50 @@ public final class MainActivity extends Activity {
 
     private void loadThumbnail(String fileName, ImageView imageView, TextView placeholderText) {
         if (fileName == null) {
-            showThumbnailPlaceholder(imageView, placeholderText, "null_fileName");
+            showThumbnailPlaceholder(
+                    imageView, placeholderText, ThumbnailPlaceholderState.MISSING);
+            logThumbnailFallback(null, "service open", "null_fileName",
+                    ThumbnailPlaceholderState.MISSING);
             return;
         }
 
         Bitmap cached;
-        boolean knownFailure;
+        ThumbnailPlaceholderState knownFailure;
         synchronized (thumbnailCache) {
             cached = thumbnailCache.get(fileName);
-            knownFailure = thumbnailFailures.contains(fileName);
-            if (cached == null && !knownFailure && thumbnailLoading.contains(fileName)) {
-                showThumbnailPlaceholder(imageView, placeholderText, "loading");
+            knownFailure = thumbnailFailures.get(fileName);
+            if (cached == null && knownFailure == null && thumbnailLoading.contains(fileName)) {
+                showThumbnailPlaceholder(
+                        imageView, placeholderText, ThumbnailPlaceholderState.LOADING);
                 return;
             }
         }
         if (cached != null) {
+            Log.d(TAG, "THUMBNAIL_CACHE_HIT fileName=" + fileName);
             placeholderText.setVisibility(View.GONE);
+            imageView.setVisibility(View.VISIBLE);
             imageView.setImageBitmap(cached);
+            imageView.setContentDescription("thumbnail loaded");
+            logThumbnailDisplay(fileName, cached, imageView, "cache");
             return;
         }
-        if (knownFailure) {
-            showThumbnailPlaceholder(imageView, placeholderText, "cached_failure");
+        if (knownFailure != null) {
+            showThumbnailPlaceholder(imageView, placeholderText, knownFailure);
             return;
         }
 
-        showThumbnailPlaceholder(imageView, placeholderText, "loading");
+        showThumbnailPlaceholder(imageView, placeholderText, ThumbnailPlaceholderState.LOADING);
         synchronized (thumbnailCache) {
             thumbnailLoading.add(fileName);
         }
-        Log.d(TAG, "OPEN_THUMBNAIL_START fileName=" + fileName);
+        Log.d(TAG, "THUMBNAIL_CACHE_MISS fileName=" + fileName
+                + " cacheMaxEntries=" + THUMBNAIL_CACHE_MAX_ENTRIES);
         thumbnailExecutor.execute(() -> {
             Bitmap bitmap = null;
             ParcelFileDescriptor pfd = null;
-            String failureReason = null;
+            String failureReason = "unknown";
+            String failureStage = "service open";
+            ThumbnailPlaceholderState failureState = ThumbnailPlaceholderState.MISSING;
             try {
                 if (destroyed) {
                     return;
@@ -578,40 +645,53 @@ public final class MainActivity extends Activity {
                 IDriveRecorderService service = ensureService();
                 if (service == null) {
                     failureReason = "service_unavailable";
+                    logThumbnailFailure(fileName, failureStage, null, failureReason, failureState);
                     return;
                 }
+                failureStage = "PFD acquire";
                 pfd = service.openThumbnail(fileName);
                 if (pfd == null || !pfd.getFileDescriptor().valid()) {
                     failureReason = "invalid_pfd";
+                    logThumbnailFailure(fileName, failureStage, null, failureReason, failureState);
                     return;
                 }
 
-                Log.d(TAG, "OPEN_THUMBNAIL_OK fileName=" + fileName);
+                failureStage = "decode";
+                failureState = ThumbnailPlaceholderState.DECODE_FAILED;
                 bitmap = BitmapFactory.decodeFileDescriptor(pfd.getFileDescriptor());
                 if (bitmap == null) {
                     failureReason = "decode_null";
+                    logThumbnailFailure(fileName, failureStage, null, failureReason, failureState);
+                    return;
+                }
+                if (destroyed) {
                     return;
                 }
                 synchronized (thumbnailCache) {
-                    thumbnailCache.put(fileName, bitmap);
+                    if (!destroyed) {
+                        thumbnailCache.put(fileName, bitmap);
+                    }
                 }
                 Log.d(TAG, "THUMBNAIL_DECODE_OK fileName=" + fileName
                         + " width=" + bitmap.getWidth()
                         + " height=" + bitmap.getHeight());
             } catch (Exception e) {
-                failureReason = e.getClass().getSimpleName() + ":" + e.getMessage();
-                Log.e(TAG, "OPEN_THUMBNAIL_FAILED fileName=" + fileName
-                        + " error=" + e.getMessage(), e);
+                failureReason = e.getMessage();
+                logThumbnailFailure(fileName, failureStage, e, failureReason, failureState);
             } finally {
                 if (pfd != null) {
                     closeQuietly(pfd, "thumbnail PFD");
                 }
-                if (bitmap == null) {
+                if (bitmap == null && !destroyed && shouldCacheThumbnailFailure(failureState)) {
                     synchronized (thumbnailCache) {
-                        thumbnailFailures.add(fileName);
+                        thumbnailFailures.put(fileName, failureState);
                     }
-                    Log.w(TAG, "THUMBNAIL_DECODE_FAILED fileName=" + fileName
-                            + " reason=" + failureReason);
+                    Log.w(TAG, "THUMBNAIL_FAILURE_CACHED fileName=" + fileName
+                            + " fallback=" + failureState.logName);
+                } else if (bitmap == null && !destroyed) {
+                    Log.w(TAG, "THUMBNAIL_FAILURE_NOT_CACHED fileName=" + fileName
+                            + " fallback=" + failureState.logName
+                            + " retryable=true");
                 }
                 synchronized (thumbnailCache) {
                     thumbnailLoading.remove(fileName);
@@ -619,26 +699,121 @@ public final class MainActivity extends Activity {
             }
 
             final Bitmap result = bitmap;
+            final String resultFailureReason = failureReason;
+            final String resultFailureStage = failureStage;
+            final ThumbnailPlaceholderState resultFailureState = failureState;
+            if (destroyed) {
+                return;
+            }
             runOnUiThread(() -> {
                 if (destroyed || !fileName.equals(imageView.getTag())) {
+                    Log.d(TAG, "THUMBNAIL_STALE_RESULT_DISCARD fileName=" + fileName
+                            + " currentTag=" + imageView.getTag());
                     return;
                 }
                 if (result != null) {
-                    placeholderText.setVisibility(View.GONE);
-                    imageView.setImageBitmap(result);
+                    try {
+                        placeholderText.setVisibility(View.GONE);
+                        imageView.setVisibility(View.VISIBLE);
+                        imageView.setImageBitmap(result);
+                        imageView.setContentDescription("thumbnail loaded");
+                        logThumbnailDisplay(fileName, result, imageView, "decode");
+                    } catch (RuntimeException e) {
+                        showThumbnailPlaceholder(
+                                imageView, placeholderText, ThumbnailPlaceholderState.DECODE_FAILED);
+                        logThumbnailFailure(fileName, "ImageView apply", e, e.getMessage(),
+                                ThumbnailPlaceholderState.DECODE_FAILED);
+                    }
                 } else {
-                    showThumbnailPlaceholder(imageView, placeholderText, "load_failed");
+                    showThumbnailPlaceholder(imageView, placeholderText, resultFailureState);
+                    logThumbnailFallback(
+                            fileName, resultFailureStage, resultFailureReason, resultFailureState);
                 }
             });
         });
     }
 
+    private static boolean shouldCacheThumbnailFailure(ThumbnailPlaceholderState state) {
+        return state == ThumbnailPlaceholderState.DECODE_FAILED;
+    }
+
+    private static void logThumbnailDisplay(
+            String fileName, Bitmap bitmap, ImageView imageView, String source) {
+        imageView.post(() -> Log.d(TAG, "THUMBNAIL_DISPLAY_APPLIED fileName=" + fileName
+                + " source=" + source
+                + " bitmapWidth=" + bitmap.getWidth()
+                + " bitmapHeight=" + bitmap.getHeight()
+                + " imageViewWidth=" + imageView.getWidth()
+                + " imageViewHeight=" + imageView.getHeight()
+                + " scaleType=" + imageView.getScaleType()));
+    }
+
     private void showThumbnailPlaceholder(
-            ImageView imageView, TextView placeholderText, String reason) {
+            ImageView imageView,
+            TextView placeholderText,
+            ThumbnailPlaceholderState state) {
         imageView.setImageDrawable(null);
         imageView.setBackgroundColor(Color.rgb(32, 43, 52));
+        imageView.setVisibility(View.INVISIBLE);
+        imageView.setContentDescription(state.contentDescription);
+        placeholderText.setText(state.label);
+        placeholderText.setContentDescription(state.contentDescription);
         placeholderText.setVisibility(View.VISIBLE);
-        Log.d(TAG, "THUMBNAIL_PLACEHOLDER reason=" + reason);
+    }
+
+    private void clearThumbnailState() {
+        synchronized (thumbnailCache) {
+            thumbnailCache.evictAll();
+            thumbnailFailures.clear();
+            thumbnailLoading.clear();
+        }
+    }
+
+    private void pruneThumbnailState(List<SegmentItem> items) {
+        Set<String> activeFileNames = new HashSet<>();
+        for (SegmentItem item : items) {
+            if (item.segment.fileName != null) {
+                activeFileNames.add(item.segment.fileName);
+            }
+        }
+
+        synchronized (thumbnailCache) {
+            Map<String, Bitmap> cached = thumbnailCache.snapshot();
+            for (String cachedFileName : cached.keySet()) {
+                if (!activeFileNames.contains(cachedFileName)) {
+                    thumbnailCache.remove(cachedFileName);
+                }
+            }
+            thumbnailFailures.keySet().retainAll(activeFileNames);
+            thumbnailLoading.retainAll(activeFileNames);
+        }
+    }
+
+    private static void logThumbnailFailure(
+            String fileName,
+            String stage,
+            Exception exception,
+            String reason,
+            ThumbnailPlaceholderState fallbackState) {
+        String exceptionClass = exception != null ? exception.getClass().getSimpleName() : "none";
+        String exceptionMessage = exception != null ? exception.getMessage() : "none";
+        Log.w(TAG, "THUMBNAIL_FAILED fileName=" + fileName
+                + " stage=" + stage
+                + " exceptionClass=" + exceptionClass
+                + " exceptionMessage=" + exceptionMessage
+                + " reason=" + reason
+                + " fallback=" + fallbackState.logName);
+    }
+
+    private static void logThumbnailFallback(
+            String fileName,
+            String stage,
+            String reason,
+            ThumbnailPlaceholderState fallbackState) {
+        Log.w(TAG, "THUMBNAIL_PLACEHOLDER_FALLBACK fileName=" + fileName
+                + " stage=" + stage
+                + " reason=" + reason
+                + " fallback=" + fallbackState.logName);
     }
 
     private void toggleSelectedSegmentProtected() {
@@ -1145,6 +1320,22 @@ public final class MainActivity extends Activity {
         ALL,
         PROTECTED,
         EVENT
+    }
+
+    private enum ThumbnailPlaceholderState {
+        LOADING("Loading...", "thumbnail loading", "loading"),
+        MISSING("No thumbnail", "thumbnail missing", "missing"),
+        DECODE_FAILED("Thumbnail failed", "thumbnail decode failed", "decode_failed");
+
+        final String label;
+        final String contentDescription;
+        final String logName;
+
+        ThumbnailPlaceholderState(String label, String contentDescription, String logName) {
+            this.label = label;
+            this.contentDescription = contentDescription;
+            this.logName = logName;
+        }
     }
 
     private static final class SegmentItem {
