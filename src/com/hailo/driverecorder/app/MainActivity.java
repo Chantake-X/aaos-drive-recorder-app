@@ -1,29 +1,33 @@
 package com.hailo.driverecorder.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
+import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.text.TextUtils;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.AbsListView;
-import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.FrameLayout;
-import android.widget.GridView;
+import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 
 import com.hailo.driverecorder.IDriveRecorderService;
@@ -45,75 +49,168 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final String TAG = "DriveRecorderApp";
     private static final String SERVICE_NAME = "hailo.driverecorder";
+    private static final int GRID_COLUMN_COUNT = 3;
+    private static final int SEEK_STEP_MS = 5_000;
+    private static final int PLAYBACK_PROGRESS_INTERVAL_MS = 500;
 
-    private final ArrayList<SegmentItem> segmentItems = new ArrayList<>();
+    private final ArrayList<SegmentItem> allSegments = new ArrayList<>();
+    private final ArrayList<SegmentItem> visibleSegments = new ArrayList<>();
     private final Map<String, Bitmap> thumbnailCache = new HashMap<>();
     private final Set<String> thumbnailFailures = new HashSet<>();
     private final Set<String> thumbnailLoading = new HashSet<>();
     private final ExecutorService thumbnailExecutor = Executors.newFixedThreadPool(2);
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
+    private View listScreen;
+    private View playbackScreen;
     private TextView statusText;
     private TextView emptyText;
-    private Button refreshButton;
+    private TextView playbackDateTimeText;
+    private TextView currentTimeText;
+    private TextView durationTimeText;
+    private Button allTab;
+    private Button protectedTab;
+    private Button eventTab;
     private Button playButton;
     private Button protectButton;
-    private Button unprotectButton;
     private Button deleteButton;
-    private Button forceDeleteButton;
-    private Button searchRecentButton;
-    private GridView segmentGrid;
+    private Button infoButton;
+    private Button backButton;
+    private Button rewindButton;
+    private Button playPauseButton;
+    private Button forwardButton;
+    private Button stopButton;
+    private LinearLayout segmentList;
+    private ScrollView segmentScroll;
+    private SeekBar playbackSeek;
     private TextureView playbackSurface;
-    private SegmentGridAdapter adapter;
 
     private IDriveRecorderService driveRecorderService;
     private VideoSegment selectedSegment;
+    private VideoSegment playbackSegment;
+    private VideoSegment pendingPlaybackSegment;
     private MediaPlayer mediaPlayer;
     private ParcelFileDescriptor currentVideo;
     private Surface playbackSurfaceOutput;
+    private SegmentFilter currentFilter = SegmentFilter.ALL;
     private boolean surfaceReady;
     private boolean waitingForFirstFrame;
     private boolean destroyed;
+    private boolean playerPrepared;
+    private boolean userSeeking;
     private int videoWidth;
     private int videoHeight;
     private long playbackStartElapsedMs = -1;
+
+    private final Runnable playbackProgressRunnable = new Runnable() {
+        @Override
+        public void run() {
+            updatePlaybackProgress();
+            if (!destroyed && mediaPlayer != null && playerPrepared) {
+                mainHandler.postDelayed(this, PLAYBACK_PROGRESS_INTERVAL_MS);
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        bindViews();
+        setupPlaybackSurface();
+        setupButtons();
+
+        Log.d(TAG, "APP_STARTED");
+        setStatus("DriveRecorderApp started");
+        setEmptyMessage("読み込み中...");
+        connectService();
+        refreshSegments();
+    }
+
+    @Override
+    protected void onDestroy() {
+        destroyed = true;
+        mainHandler.removeCallbacks(playbackProgressRunnable);
+        thumbnailExecutor.shutdownNow();
+        releasePlayer();
+        releasePlaybackSurface();
+        super.onDestroy();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (playbackScreen.getVisibility() == View.VISIBLE) {
+            showListScreen();
+            return;
+        }
+        super.onBackPressed();
+    }
+
+    private void bindViews() {
+        listScreen = findViewById(R.id.list_screen);
+        playbackScreen = findViewById(R.id.playback_screen);
         statusText = findViewById(R.id.status_text);
         emptyText = findViewById(R.id.empty_text);
-        refreshButton = findViewById(R.id.refresh_button);
+        playbackDateTimeText = findViewById(R.id.playback_datetime);
+        currentTimeText = findViewById(R.id.current_time_text);
+        durationTimeText = findViewById(R.id.duration_time_text);
+        allTab = findViewById(R.id.all_tab);
+        protectedTab = findViewById(R.id.protected_tab);
+        eventTab = findViewById(R.id.event_tab);
         playButton = findViewById(R.id.play_button);
         protectButton = findViewById(R.id.protect_button);
-        unprotectButton = findViewById(R.id.unprotect_button);
         deleteButton = findViewById(R.id.delete_button);
-        forceDeleteButton = findViewById(R.id.force_delete_button);
-        searchRecentButton = findViewById(R.id.search_recent_button);
-        segmentGrid = findViewById(R.id.segment_grid);
+        infoButton = findViewById(R.id.info_button);
+        backButton = findViewById(R.id.back_button);
+        rewindButton = findViewById(R.id.rewind_button);
+        playPauseButton = findViewById(R.id.play_pause_button);
+        forwardButton = findViewById(R.id.forward_button);
+        stopButton = findViewById(R.id.stop_button);
+        segmentList = findViewById(R.id.segment_list);
+        segmentScroll = findViewById(R.id.segment_scroll);
+        playbackSeek = findViewById(R.id.playback_seek);
         playbackSurface = findViewById(R.id.playback_surface);
+    }
 
-        adapter = new SegmentGridAdapter();
-        segmentGrid.setAdapter(adapter);
-        segmentGrid.setEmptyView(emptyText);
-        segmentGrid.setOnItemClickListener((parent, view, position, id) -> {
-            SegmentItem item = segmentItems.get(position);
-            selectedSegment = item.segment;
-            adapter.notifyDataSetChanged();
-            updateActionButtons();
-            setStatus("Selected: " + item.segment.fileName);
-            playSegment(item.segment);
-        });
-        segmentGrid.setOnItemLongClickListener((parent, view, position, id) -> {
-            SegmentItem item = segmentItems.get(position);
-            selectedSegment = item.segment;
-            adapter.notifyDataSetChanged();
-            updateActionButtons();
-            setStatus("Selected: " + item.segment.fileName);
-            return true;
-        });
+    private void setupButtons() {
+        allTab.setOnClickListener(view -> setFilter(SegmentFilter.ALL));
+        protectedTab.setOnClickListener(view -> setFilter(SegmentFilter.PROTECTED));
+        eventTab.setOnClickListener(view -> setFilter(SegmentFilter.EVENT));
+        playButton.setOnClickListener(view -> openSelectedForPlayback());
+        protectButton.setOnClickListener(view -> toggleSelectedSegmentProtected());
+        deleteButton.setOnClickListener(view -> deleteSelectedSegment(false));
+        infoButton.setOnClickListener(view -> showSelectedSegmentInfo());
+        backButton.setOnClickListener(view -> showListScreen());
+        rewindButton.setOnClickListener(view -> seekBy(-SEEK_STEP_MS));
+        playPauseButton.setOnClickListener(view -> togglePlayback());
+        forwardButton.setOnClickListener(view -> seekBy(SEEK_STEP_MS));
+        stopButton.setOnClickListener(view -> stopPlayback());
+        playbackSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (fromUser) {
+                    currentTimeText.setText(formatDuration(progress));
+                }
+            }
 
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+                userSeeking = true;
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                userSeeking = false;
+                seekTo(seekBar.getProgress());
+            }
+        });
+        updateTabButtons();
+        updateActionButtons();
+        updatePlaybackButtons();
+    }
+
+    private void setupPlaybackSurface() {
         playbackSurface.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override
             public void onSurfaceTextureAvailable(
@@ -125,6 +222,11 @@ public final class MainActivity extends Activity {
                 updatePlaybackSurfaceLayout();
                 if (mediaPlayer != null) {
                     mediaPlayer.setSurface(playbackSurfaceOutput);
+                }
+                if (pendingPlaybackSegment != null) {
+                    VideoSegment segment = pendingPlaybackSegment;
+                    pendingPlaybackSegment = null;
+                    playSegment(segment);
                 }
             }
 
@@ -158,34 +260,6 @@ public final class MainActivity extends Activity {
                 }
             }
         });
-
-        refreshButton.setOnClickListener(view -> refreshSegments());
-        playButton.setOnClickListener(view -> playSelectedSegment());
-        protectButton.setOnClickListener(
-                view -> setSelectedSegmentProtected(true));
-        unprotectButton.setOnClickListener(
-                view -> setSelectedSegmentProtected(false));
-        deleteButton.setOnClickListener(
-                view -> deleteSelectedSegment(false));
-        forceDeleteButton.setOnClickListener(
-                view -> deleteSelectedSegment(true));
-        searchRecentButton.setOnClickListener(view -> searchRecentSegments());
-        updateActionButtons();
-
-        Log.d(TAG, "APP_STARTED");
-        setStatus("DriveRecorderApp started");
-        setEmptyMessage("Loading segments...");
-        connectService();
-        refreshSegments();
-    }
-
-    @Override
-    protected void onDestroy() {
-        destroyed = true;
-        thumbnailExecutor.shutdownNow();
-        releasePlayer();
-        releasePlaybackSurface();
-        super.onDestroy();
     }
 
     private void connectService() {
@@ -210,14 +284,15 @@ public final class MainActivity extends Activity {
 
     private void refreshSegments() {
         setStatus("Loading segments...");
-        setEmptyMessage("Loading segments...");
+        setEmptyMessage("読み込み中...");
         new Thread(() -> {
             try {
                 IDriveRecorderService service = ensureService();
                 if (service == null) {
                     runOnUiThread(() -> {
-                        segmentItems.clear();
-                        adapter.notifyDataSetChanged();
+                        allSegments.clear();
+                        selectedSegment = null;
+                        applyFilterAndRender();
                         setEmptyMessage("Service unavailable");
                         setStatus("Service unavailable");
                     });
@@ -247,75 +322,218 @@ public final class MainActivity extends Activity {
         }, "DriveRecorderApp-refresh").start();
     }
 
-    private void searchRecentSegments() {
-        setStatus("Searching recent segments...");
-        setEmptyMessage("Searching recent segments...");
-        new Thread(() -> {
-            try {
-                IDriveRecorderService service = ensureService();
-                if (service == null) {
-                    runOnUiThread(() -> {
-                        segmentItems.clear();
-                        selectedSegment = null;
-                        adapter.notifyDataSetChanged();
-                        updateActionButtons();
-                        setEmptyMessage("Service unavailable");
-                        setStatus("Service unavailable");
-                    });
-                    return;
-                }
-
-                long nowMs = System.currentTimeMillis();
-                long fromMs = nowMs - (60L * 60L * 1000L);
-                Log.d(TAG, "SEARCH_BY_TIME_START from=" + fromMs + " to=" + nowMs);
-                VideoSegment[] segments = service.searchByTime(fromMs, nowMs);
-                List<SegmentItem> items = new ArrayList<>();
-                if (segments != null) {
-                    for (VideoSegment segment : segments) {
-                        if (segment != null && segment.fileName != null) {
-                            items.add(new SegmentItem(segment));
-                        }
-                    }
-                }
-
-                runOnUiThread(() -> applySegmentItems(items, "Recent 1h"));
-                Log.d(TAG, "SEARCH_BY_TIME_OK count=" + items.size());
-            } catch (Exception e) {
-                Log.e(TAG, "SEARCH_BY_TIME_FAILED error=" + e.getMessage(), e);
-                runOnUiThread(() -> {
-                    setEmptyMessage("searchByTime failed: " + e.getMessage());
-                    setStatus("searchByTime failed: " + e.getMessage());
-                });
-            }
-        }, "DriveRecorderApp-search").start();
-    }
-
     private void applySegmentItems(List<SegmentItem> items, String label) {
         String selectedFileName = selectedSegment != null ? selectedSegment.fileName : null;
-        selectedSegment = null;
-        segmentItems.clear();
-        segmentItems.addAll(items);
+        allSegments.clear();
+        allSegments.addAll(items);
         synchronized (thumbnailCache) {
             thumbnailFailures.clear();
         }
-        adapter.notifyDataSetChanged();
+        selectedSegment = null;
         if (selectedFileName != null) {
-            for (SegmentItem item : segmentItems) {
+            for (SegmentItem item : allSegments) {
                 if (selectedFileName.equals(item.segment.fileName)) {
                     selectedSegment = item.segment;
                     break;
                 }
             }
         }
-        updateActionButtons();
-        if (items.isEmpty()) {
-            Log.d(TAG, "SEGMENT_LIST_EMPTY label=" + label);
-            setEmptyMessage("No MP4 segments found.");
-            setStatus(label + ": 0");
-        } else {
-            setEmptyMessage("");
-            setStatus(label + ": " + items.size());
+        applyFilterAndRender();
+        setStatus(label + ": " + items.size());
+    }
+
+    private void setFilter(SegmentFilter filter) {
+        currentFilter = filter;
+        selectedSegment = null;
+        updateTabButtons();
+        applyFilterAndRender();
+    }
+
+    private void applyFilterAndRender() {
+        visibleSegments.clear();
+        if (currentFilter == SegmentFilter.EVENT) {
+            renderSegments();
+            updateActionButtons();
+            return;
         }
+        for (SegmentItem item : allSegments) {
+            if (currentFilter == SegmentFilter.ALL || item.segment.protectedFlag) {
+                visibleSegments.add(item);
+            }
+        }
+        if (selectedSegment != null && !containsVisibleSegment(selectedSegment.fileName)) {
+            selectedSegment = null;
+        }
+        renderSegments();
+        updateActionButtons();
+    }
+
+    private boolean containsVisibleSegment(String fileName) {
+        for (SegmentItem item : visibleSegments) {
+            if (fileName.equals(item.segment.fileName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void renderSegments() {
+        segmentList.removeAllViews();
+        if (currentFilter == SegmentFilter.EVENT) {
+            setEmptyMessage("イベント録画は未対応");
+            emptyText.setVisibility(View.VISIBLE);
+            segmentScroll.setVisibility(View.GONE);
+            return;
+        }
+        if (visibleSegments.isEmpty()) {
+            String message = currentFilter == SegmentFilter.PROTECTED
+                    ? "保護済み録画はありません"
+                    : "No MP4 segments found.";
+            setEmptyMessage(message);
+            emptyText.setVisibility(View.VISIBLE);
+            segmentScroll.setVisibility(View.GONE);
+            return;
+        }
+
+        emptyText.setVisibility(View.GONE);
+        segmentScroll.setVisibility(View.VISIBLE);
+        String currentDate = null;
+        GridLayout currentGrid = null;
+        for (SegmentItem item : visibleSegments) {
+            String dateLabel = item.dateLabel();
+            if (!dateLabel.equals(currentDate)) {
+                currentDate = dateLabel;
+                TextView header = createDateHeader(dateLabel);
+                segmentList.addView(header);
+                currentGrid = createSegmentGrid();
+                segmentList.addView(currentGrid);
+            }
+            currentGrid.addView(createSegmentCard(item));
+        }
+    }
+
+    private TextView createDateHeader(String dateLabel) {
+        TextView header = new TextView(this);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, dp(8), 0, dp(4));
+        header.setLayoutParams(params);
+        header.setText(dateLabel);
+        header.setTextColor(Color.rgb(242, 244, 248));
+        header.setTextSize(16);
+        header.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        return header;
+    }
+
+    private GridLayout createSegmentGrid() {
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(GRID_COLUMN_COUNT);
+        grid.setUseDefaultMargins(false);
+        grid.setAlignmentMode(GridLayout.ALIGN_BOUNDS);
+        grid.setColumnOrderPreserved(false);
+        grid.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        return grid;
+    }
+
+    private View createSegmentCard(SegmentItem item) {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(5), dp(5), dp(5), dp(5));
+        root.setBackground(createCardBackground(isSelected(item)));
+        root.setClickable(true);
+        root.setFocusable(true);
+        root.setOnClickListener(view -> {
+            selectedSegment = item.segment;
+            renderSegments();
+            updateActionButtons();
+            setStatus("Selected: " + item.segment.fileName);
+        });
+
+        GridLayout.LayoutParams params = new GridLayout.LayoutParams();
+        params.width = 0;
+        params.height = dp(170);
+        params.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
+        params.setMargins(dp(4), dp(4), dp(4), dp(6));
+        root.setLayoutParams(params);
+
+        FrameLayout thumbnailFrame = new FrameLayout(this);
+        thumbnailFrame.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        thumbnailFrame.setBackgroundColor(Color.rgb(32, 43, 52));
+
+        ImageView imageView = new ImageView(this);
+        imageView.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        imageView.setAdjustViewBounds(false);
+        imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        imageView.setTag(item.segment.fileName);
+        thumbnailFrame.addView(imageView);
+
+        TextView placeholderText = new TextView(this);
+        placeholderText.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        placeholderText.setGravity(Gravity.CENTER);
+        placeholderText.setText("No thumbnail");
+        placeholderText.setTextColor(Color.rgb(200, 209, 218));
+        placeholderText.setTextSize(12);
+        thumbnailFrame.addView(placeholderText);
+
+        TextView lockText = createOverlayText("🔒", Gravity.TOP | Gravity.END);
+        lockText.setVisibility(item.segment.protectedFlag ? View.VISIBLE : View.GONE);
+        thumbnailFrame.addView(lockText);
+
+        TextView checkText = createOverlayText("✓", Gravity.TOP | Gravity.START);
+        checkText.setVisibility(isSelected(item) ? View.VISIBLE : View.GONE);
+        thumbnailFrame.addView(checkText);
+
+        TextView timeText = new TextView(this);
+        timeText.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        timeText.setEllipsize(TextUtils.TruncateAt.END);
+        timeText.setGravity(Gravity.CENTER);
+        timeText.setMaxLines(1);
+        timeText.setPadding(0, dp(4), 0, 0);
+        timeText.setText(item.timeLabel());
+        timeText.setTextColor(Color.rgb(242, 244, 248));
+        timeText.setTextSize(13);
+
+        root.addView(thumbnailFrame);
+        root.addView(timeText);
+        loadThumbnail(item.segment.fileName, imageView, placeholderText);
+        return root;
+    }
+
+    private TextView createOverlayText(String text, int gravity) {
+        TextView view = new TextView(this);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                dp(28), dp(28), gravity);
+        params.setMargins(dp(4), dp(4), dp(4), dp(4));
+        view.setLayoutParams(params);
+        view.setGravity(Gravity.CENTER);
+        view.setText(text);
+        view.setTextColor(Color.WHITE);
+        view.setTextSize(15);
+        view.setBackgroundColor(Color.rgb(46, 123, 239));
+        return view;
+    }
+
+    private GradientDrawable createCardBackground(boolean selected) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(Color.rgb(24, 32, 40));
+        drawable.setStroke(dp(selected ? 3 : 1),
+                selected ? Color.rgb(46, 123, 239) : Color.rgb(48, 64, 77));
+        return drawable;
+    }
+
+    private boolean isSelected(SegmentItem item) {
+        return selectedSegment != null
+                && item.segment.fileName.equals(selectedSegment.fileName);
     }
 
     private void loadThumbnail(String fileName, ImageView imageView, TextView placeholderText) {
@@ -423,6 +641,15 @@ public final class MainActivity extends Activity {
         Log.d(TAG, "THUMBNAIL_PLACEHOLDER reason=" + reason);
     }
 
+    private void toggleSelectedSegmentProtected() {
+        VideoSegment segment = selectedSegment;
+        if (segment == null) {
+            setStatus("Select a segment first");
+            return;
+        }
+        setSelectedSegmentProtected(!segment.protectedFlag);
+    }
+
     private void setSelectedSegmentProtected(boolean protectedFlag) {
         VideoSegment segment = selectedSegment;
         if (segment == null) {
@@ -463,8 +690,7 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        setStatus((forceProtected ? "Force deleting: " : "Deleting: ")
-                + segment.fileName);
+        setStatus("Deleting: " + segment.fileName);
         new Thread(() -> {
             try {
                 IDriveRecorderService service = ensureService();
@@ -478,7 +704,8 @@ public final class MainActivity extends Activity {
                 Log.d(TAG, "DELETE_SEGMENT_OK fileName=" + segment.fileName
                         + " forceProtected=" + forceProtected);
                 runOnUiThread(() -> {
-                    if (currentVideo != null && mediaPlayer != null) {
+                    if (playbackSegment != null
+                            && segment.fileName.equals(playbackSegment.fileName)) {
                         releasePlayer();
                     }
                     selectedSegment = null;
@@ -495,23 +722,72 @@ public final class MainActivity extends Activity {
         }, "DriveRecorderApp-delete").start();
     }
 
-    private void updateActionButtons() {
-        boolean hasSelection = selectedSegment != null;
-        playButton.setEnabled(hasSelection);
-        protectButton.setEnabled(hasSelection && !selectedSegment.protectedFlag);
-        unprotectButton.setEnabled(hasSelection && selectedSegment.protectedFlag);
-        deleteButton.setEnabled(hasSelection);
-        forceDeleteButton.setEnabled(hasSelection);
-    }
-
-    private void playSelectedSegment() {
+    private void showSelectedSegmentInfo() {
         VideoSegment segment = selectedSegment;
         if (segment == null) {
             setStatus("Select a segment first");
             return;
         }
-        setStatus("Opening: " + segment.fileName);
-        playSegment(segment);
+        String message = "fileName: " + segment.fileName
+                + "\nstartEpochMs: " + segment.startEpochMs
+                + "\ndurationMs: " + segment.durationMs
+                + "\nsizeBytes: " + segment.sizeBytes
+                + "\nprotectedFlag: " + segment.protectedFlag;
+        new AlertDialog.Builder(this)
+                .setTitle("録画情報")
+                .setMessage(message)
+                .setPositiveButton("OK", null)
+                .show();
+    }
+
+    private void updateActionButtons() {
+        boolean hasSelection = selectedSegment != null;
+        playButton.setEnabled(hasSelection);
+        protectButton.setEnabled(hasSelection);
+        deleteButton.setEnabled(hasSelection);
+        infoButton.setEnabled(hasSelection);
+        if (hasSelection && selectedSegment.protectedFlag) {
+            protectButton.setText(R.string.dvr_action_unprotect);
+        } else {
+            protectButton.setText(R.string.dvr_action_protect);
+        }
+    }
+
+    private void openSelectedForPlayback() {
+        VideoSegment segment = selectedSegment;
+        if (segment == null) {
+            setStatus("Select a segment first");
+            return;
+        }
+        showPlaybackScreen(segment);
+        if (surfaceReady && playbackSurfaceOutput != null && playbackSurfaceOutput.isValid()) {
+            playSegment(segment);
+        } else {
+            pendingPlaybackSegment = segment;
+            setStatus("Waiting for playback surface...");
+        }
+    }
+
+    private void showPlaybackScreen(VideoSegment segment) {
+        playbackSegment = segment;
+        playbackDateTimeText.setText(new SegmentItem(segment).playbackDateTimeLabel());
+        playbackSeek.setProgress(0);
+        playbackSeek.setMax(0);
+        currentTimeText.setText(formatDuration(0));
+        durationTimeText.setText(formatDuration(0));
+        listScreen.setVisibility(View.GONE);
+        playbackScreen.setVisibility(View.VISIBLE);
+        updatePlaybackButtons();
+    }
+
+    private void showListScreen() {
+        pendingPlaybackSegment = null;
+        releasePlayer();
+        playbackScreen.setVisibility(View.GONE);
+        listScreen.setVisibility(View.VISIBLE);
+        renderSegments();
+        updateActionButtons();
+        setStatus("List");
     }
 
     private void playSegment(VideoSegment segment) {
@@ -541,7 +817,6 @@ public final class MainActivity extends Activity {
                     return;
                 }
                 Log.d(TAG, "OPEN_VIDEO_OK fileName=" + segment.fileName);
-                runOnUiThread(() -> setStatus("PFD opened: " + segment.fileName));
 
                 ParcelFileDescriptor video = pfd;
                 pfd = null;
@@ -564,11 +839,14 @@ public final class MainActivity extends Activity {
                 Log.e(TAG, "OPEN_VIDEO_FAILED fileName=" + segment.fileName
                         + " error=surface_not_ready");
                 closeQuietly(pfd, "surface not ready");
-                setStatus("Playback error: surface not ready");
+                pendingPlaybackSegment = segment;
+                setStatus("Playback surface not ready");
                 return;
             }
 
             releasePlayer();
+            playbackSegment = segment;
+            playerPrepared = false;
             waitingForFirstFrame = true;
             playbackSurface.setAlpha(0.0f);
             videoWidth = 0;
@@ -578,12 +856,21 @@ public final class MainActivity extends Activity {
             player.setSurface(playbackSurfaceOutput);
             player.setDataSource(pfd.getFileDescriptor());
             player.setOnPreparedListener(mp -> {
+                int durationMs = Math.max(0, mp.getDuration());
                 Log.d(TAG, "PLAYER_PREPARED fileName=" + segment.fileName
-                        + " durationMs=" + mp.getDuration()
+                        + " durationMs=" + durationMs
                         + " videoWidth=" + mp.getVideoWidth()
                         + " videoHeight=" + mp.getVideoHeight());
+                playerPrepared = true;
+                playbackSeek.setMax(durationMs);
+                playbackSeek.setProgress(0);
+                currentTimeText.setText(formatDuration(0));
+                durationTimeText.setText(formatDuration(durationMs));
                 playbackStartElapsedMs = SystemClock.elapsedRealtime();
                 mp.start();
+                updatePlaybackButtons();
+                mainHandler.removeCallbacks(playbackProgressRunnable);
+                mainHandler.post(playbackProgressRunnable);
                 Log.d(TAG, "PLAYER_STARTED fileName=" + segment.fileName
                         + " elapsedMs=" + playbackStartElapsedMs);
                 setStatus("Playing: " + segment.fileName);
@@ -595,24 +882,28 @@ public final class MainActivity extends Activity {
                 Log.d(TAG, "VIDEO_SIZE_CHANGED width=" + width
                         + " height=" + height);
             });
-            player.setOnCompletionListener(
-                    mp -> {
-                        long completedElapsedMs = SystemClock.elapsedRealtime();
-                        long playedMs = playbackStartElapsedMs >= 0
-                                ? completedElapsedMs - playbackStartElapsedMs
-                                : -1;
-                        Log.d(TAG, "PLAYER_COMPLETED fileName=" + segment.fileName
-                                + " elapsedMs=" + completedElapsedMs
-                                + " playedMs=" + playedMs);
-                        playbackStartElapsedMs = -1;
-                        waitingForFirstFrame = false;
-                        setStatus("Playback completed: " + segment.fileName);
-                    });
+            player.setOnCompletionListener(mp -> {
+                long completedElapsedMs = SystemClock.elapsedRealtime();
+                long playedMs = playbackStartElapsedMs >= 0
+                        ? completedElapsedMs - playbackStartElapsedMs
+                        : -1;
+                Log.d(TAG, "PLAYER_COMPLETED fileName=" + segment.fileName
+                        + " elapsedMs=" + completedElapsedMs
+                        + " playedMs=" + playedMs);
+                playbackStartElapsedMs = -1;
+                waitingForFirstFrame = false;
+                updatePlaybackProgress();
+                updatePlaybackButtons();
+                setStatus("Playback completed: " + segment.fileName);
+            });
             player.setOnErrorListener((mp, what, extra) -> {
                 Log.e(TAG, "PLAYER_ERROR what=" + what + " extra=" + extra);
                 playbackStartElapsedMs = -1;
                 waitingForFirstFrame = false;
+                playerPrepared = false;
                 playbackSurface.setAlpha(0.0f);
+                mainHandler.removeCallbacks(playbackProgressRunnable);
+                updatePlaybackButtons();
                 setStatus("Playback error: what=" + what + " extra=" + extra);
                 return true;
             });
@@ -628,6 +919,105 @@ public final class MainActivity extends Activity {
             closeQuietly(pfd, "playback setup failed");
             setStatus("Playback error: " + e.getMessage());
         }
+    }
+
+    private void togglePlayback() {
+        if (mediaPlayer == null || !playerPrepared) {
+            if (playbackSegment != null) {
+                playSegment(playbackSegment);
+            }
+            return;
+        }
+        try {
+            if (mediaPlayer.isPlaying()) {
+                mediaPlayer.pause();
+                setStatus("Paused");
+            } else {
+                mediaPlayer.start();
+                mainHandler.removeCallbacks(playbackProgressRunnable);
+                mainHandler.post(playbackProgressRunnable);
+                setStatus("Playing");
+            }
+            updatePlaybackButtons();
+        } catch (IllegalStateException e) {
+            Log.e(TAG, "TOGGLE_PLAYBACK_FAILED error=" + e.getMessage(), e);
+            setStatus("Playback control error: " + e.getMessage());
+        }
+    }
+
+    private void stopPlayback() {
+        releasePlayer();
+        playbackSeek.setProgress(0);
+        currentTimeText.setText(formatDuration(0));
+        updatePlaybackButtons();
+        setStatus("Playback stopped");
+    }
+
+    private void seekBy(int deltaMs) {
+        if (mediaPlayer == null || !playerPrepared) {
+            return;
+        }
+        int currentMs;
+        try {
+            currentMs = mediaPlayer.getCurrentPosition();
+        } catch (IllegalStateException e) {
+            return;
+        }
+        seekTo(currentMs + deltaMs);
+    }
+
+    private void seekTo(int requestedMs) {
+        if (mediaPlayer == null || !playerPrepared) {
+            return;
+        }
+        int durationMs = playbackSeek.getMax();
+        int targetMs = Math.max(0, Math.min(requestedMs, durationMs));
+        try {
+            mediaPlayer.seekTo(targetMs);
+            playbackSeek.setProgress(targetMs);
+            currentTimeText.setText(formatDuration(targetMs));
+            Log.d(TAG, "PLAYER_SEEK targetMs=" + targetMs);
+        } catch (IllegalStateException e) {
+            Log.e(TAG, "PLAYER_SEEK_FAILED error=" + e.getMessage(), e);
+            setStatus("Seek error: " + e.getMessage());
+        }
+    }
+
+    private void updatePlaybackProgress() {
+        if (mediaPlayer == null || !playerPrepared || userSeeking) {
+            return;
+        }
+        try {
+            int positionMs = Math.max(0, mediaPlayer.getCurrentPosition());
+            int durationMs = Math.max(playbackSeek.getMax(), Math.max(0, mediaPlayer.getDuration()));
+            if (playbackSeek.getMax() != durationMs) {
+                playbackSeek.setMax(durationMs);
+                durationTimeText.setText(formatDuration(durationMs));
+            }
+            playbackSeek.setProgress(Math.min(positionMs, durationMs));
+            currentTimeText.setText(formatDuration(positionMs));
+        } catch (IllegalStateException e) {
+            Log.w(TAG, "PLAYER_PROGRESS_FAILED error=" + e.getMessage());
+        }
+    }
+
+    private void updatePlaybackButtons() {
+        boolean prepared = mediaPlayer != null && playerPrepared;
+        rewindButton.setEnabled(prepared);
+        forwardButton.setEnabled(prepared);
+        stopButton.setEnabled(mediaPlayer != null);
+        playPauseButton.setEnabled(playbackSegment != null);
+        boolean playing = false;
+        if (prepared) {
+            try {
+                playing = mediaPlayer.isPlaying();
+            } catch (IllegalStateException ignored) {
+                playing = false;
+            }
+        }
+        playPauseButton.setText(playing
+                ? R.string.dvr_action_pause
+                : R.string.dvr_action_resume);
     }
 
     private void releasePlaybackSurface() {
@@ -647,7 +1037,7 @@ public final class MainActivity extends Activity {
 
         if (parentWidth <= 0 || parentHeight <= 0 || videoWidth <= 0 || videoHeight <= 0) {
             FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                    1, 1, Gravity.END | Gravity.CENTER_VERTICAL);
+                    1, 1, Gravity.CENTER);
             playbackSurface.setLayoutParams(params);
             return;
         }
@@ -661,7 +1051,7 @@ public final class MainActivity extends Activity {
         }
 
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                displayWidth, displayHeight, Gravity.END | Gravity.CENTER_VERTICAL);
+                displayWidth, displayHeight, Gravity.CENTER);
         playbackSurface.setLayoutParams(params);
         Log.d(TAG, "PLAYBACK_LAYOUT videoWidth=" + videoWidth
                 + " videoHeight=" + videoHeight
@@ -669,7 +1059,7 @@ public final class MainActivity extends Activity {
                 + " parentHeight=" + parentHeight
                 + " displayWidth=" + displayWidth
                 + " displayHeight=" + displayHeight
-                + " gravity=end|center_vertical");
+                + " gravity=center");
     }
 
     private IDriveRecorderService ensureService() {
@@ -680,8 +1070,10 @@ public final class MainActivity extends Activity {
     }
 
     private void releasePlayer() {
+        mainHandler.removeCallbacks(playbackProgressRunnable);
         playbackStartElapsedMs = -1;
         waitingForFirstFrame = false;
+        playerPrepared = false;
         if (playbackSurface != null) {
             playbackSurface.setAlpha(0.0f);
         }
@@ -699,6 +1091,17 @@ public final class MainActivity extends Activity {
             closeQuietly(currentVideo, "current PFD");
             currentVideo = null;
         }
+    }
+
+    private void updateTabButtons() {
+        updateTabButton(allTab, currentFilter == SegmentFilter.ALL);
+        updateTabButton(protectedTab, currentFilter == SegmentFilter.PROTECTED);
+        updateTabButton(eventTab, currentFilter == SegmentFilter.EVENT);
+    }
+
+    private void updateTabButton(Button button, boolean selected) {
+        button.setTextColor(selected ? Color.WHITE : Color.rgb(200, 209, 218));
+        button.setBackgroundColor(selected ? Color.rgb(46, 123, 239) : Color.rgb(36, 49, 60));
     }
 
     private void setStatus(String message) {
@@ -730,138 +1133,27 @@ public final class MainActivity extends Activity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private final class SegmentGridAdapter extends BaseAdapter {
-        @Override
-        public int getCount() {
-            return segmentItems.size();
-        }
-
-        @Override
-        public SegmentItem getItem(int position) {
-            return segmentItems.get(position);
-        }
-
-        @Override
-        public long getItemId(int position) {
-            return getItem(position).segment.segmentId;
-        }
-
-        @Override
-        public View getView(int position, View convertView, ViewGroup parent) {
-            ViewHolder holder;
-            if (convertView == null) {
-                holder = createGridItemView();
-                convertView = holder.root;
-                convertView.setTag(holder);
-            } else {
-                holder = (ViewHolder) convertView.getTag();
-            }
-
-            SegmentItem item = getItem(position);
-            String fileName = item.segment.fileName;
-            boolean selected = selectedSegment != null
-                    && fileName.equals(selectedSegment.fileName);
-            holder.root.setBackgroundColor(selected
-                    ? Color.rgb(63, 126, 166)
-                    : Color.rgb(24, 32, 40));
-            holder.imageView.setTag(fileName);
-            holder.titleText.setText(item.shortFileName());
-            holder.detailText.setText(item.detailText());
-            holder.badgeText.setVisibility(
-                    item.segment.protectedFlag ? View.VISIBLE : View.GONE);
-            loadThumbnail(fileName, holder.imageView, holder.placeholderText);
-            return convertView;
-        }
-
-        private ViewHolder createGridItemView() {
-            LinearLayout root = new LinearLayout(MainActivity.this);
-            root.setOrientation(LinearLayout.VERTICAL);
-            root.setPadding(dp(4), dp(4), dp(4), dp(4));
-            root.setLayoutParams(new AbsListView.LayoutParams(
-                    AbsListView.LayoutParams.MATCH_PARENT, dp(178)));
-
-            FrameLayout thumbnailFrame = new FrameLayout(MainActivity.this);
-            thumbnailFrame.setLayoutParams(new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, dp(120)));
-            thumbnailFrame.setBackgroundColor(Color.rgb(32, 43, 52));
-
-            ImageView imageView = new ImageView(MainActivity.this);
-            imageView.setLayoutParams(new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT));
-            imageView.setAdjustViewBounds(false);
-            imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            thumbnailFrame.addView(imageView);
-
-            TextView placeholderText = new TextView(MainActivity.this);
-            placeholderText.setLayoutParams(new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT));
-            placeholderText.setGravity(Gravity.CENTER);
-            placeholderText.setText("No thumbnail");
-            placeholderText.setTextColor(Color.rgb(200, 209, 218));
-            placeholderText.setTextSize(12);
-            thumbnailFrame.addView(placeholderText);
-
-            TextView badgeText = new TextView(MainActivity.this);
-            FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.TOP | Gravity.END);
-            badgeText.setLayoutParams(badgeParams);
-            badgeText.setBackgroundColor(Color.rgb(160, 0, 0));
-            badgeText.setPadding(dp(4), dp(1), dp(4), dp(1));
-            badgeText.setText("PROT");
-            badgeText.setTextColor(Color.WHITE);
-            badgeText.setTextSize(10);
-            thumbnailFrame.addView(badgeText);
-
-            TextView titleText = new TextView(MainActivity.this);
-            titleText.setLayoutParams(new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT));
-            titleText.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            titleText.setMaxLines(1);
-            titleText.setPadding(0, dp(3), 0, 0);
-            titleText.setTextColor(Color.rgb(242, 244, 248));
-            titleText.setTextSize(11);
-
-            TextView detailText = new TextView(MainActivity.this);
-            detailText.setLayoutParams(new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT));
-            detailText.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            detailText.setMaxLines(1);
-            detailText.setTextColor(Color.rgb(200, 209, 218));
-            detailText.setTextSize(10);
-
-            root.addView(thumbnailFrame);
-            root.addView(titleText);
-            root.addView(detailText);
-
-            ViewHolder holder = new ViewHolder();
-            holder.root = root;
-            holder.imageView = imageView;
-            holder.placeholderText = placeholderText;
-            holder.badgeText = badgeText;
-            holder.titleText = titleText;
-            holder.detailText = detailText;
-            return holder;
-        }
+    private static String formatDuration(int durationMs) {
+        int safeMs = Math.max(0, durationMs);
+        int totalSeconds = safeMs / 1000;
+        int minutes = totalSeconds / 60;
+        int seconds = totalSeconds % 60;
+        return String.format(Locale.US, "%02d:%02d", minutes, seconds);
     }
 
-    private static final class ViewHolder {
-        LinearLayout root;
-        ImageView imageView;
-        TextView placeholderText;
-        TextView badgeText;
-        TextView titleText;
-        TextView detailText;
+    private enum SegmentFilter {
+        ALL,
+        PROTECTED,
+        EVENT
     }
 
     private static final class SegmentItem {
         private static final SimpleDateFormat DATE_FORMAT =
-                new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
+                new SimpleDateFormat("yyyy年M月d日（E）", Locale.JAPAN);
+        private static final SimpleDateFormat TIME_FORMAT =
+                new SimpleDateFormat("HH:mm", Locale.JAPAN);
+        private static final SimpleDateFormat PLAYBACK_FORMAT =
+                new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.JAPAN);
 
         final VideoSegment segment;
 
@@ -869,43 +1161,25 @@ public final class MainActivity extends Activity {
             this.segment = segment;
         }
 
-        String shortFileName() {
-            String name = segment.fileName;
-            if (name == null || name.length() <= 24) {
-                return name;
+        String dateLabel() {
+            if (segment.startEpochMs <= 0) {
+                return "日付不明";
             }
-            return name.substring(0, 12) + "..." + name.substring(name.length() - 9);
+            return DATE_FORMAT.format(new Date(segment.startEpochMs));
         }
 
-        String detailText() {
-            StringBuilder builder = new StringBuilder();
-            if (segment.startEpochMs > 0) {
-                builder.append(DATE_FORMAT.format(new Date(segment.startEpochMs)));
-            } else {
-                builder.append(segment.sizeBytes).append("B");
+        String timeLabel() {
+            if (segment.startEpochMs <= 0) {
+                return "時刻不明";
             }
-            if (segment.durationMs > 0) {
-                builder.append("  ").append(segment.durationMs).append("ms");
-            }
-            return builder.toString();
+            return TIME_FORMAT.format(new Date(segment.startEpochMs));
         }
 
-        @Override
-        public String toString() {
-            StringBuilder builder = new StringBuilder();
-            builder.append(segment.fileName);
-            builder.append("  size=").append(segment.sizeBytes).append("B");
-            if (segment.startEpochMs > 0) {
-                builder.append("  start=")
-                        .append(DATE_FORMAT.format(new Date(segment.startEpochMs)));
+        String playbackDateTimeLabel() {
+            if (segment.startEpochMs <= 0) {
+                return "時刻不明";
             }
-            if (segment.durationMs > 0) {
-                builder.append("  duration=").append(segment.durationMs).append("ms");
-            }
-            if (segment.protectedFlag) {
-                builder.append("  protected");
-            }
-            return builder.toString();
+            return PLAYBACK_FORMAT.format(new Date(segment.startEpochMs));
         }
     }
 }

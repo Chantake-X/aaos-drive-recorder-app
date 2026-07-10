@@ -1,181 +1,345 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#101418"
-    android:fitsSystemWindows="true"
-    android:orientation="vertical"
-    android:padding="12dp">
-
-    <TextView
-        android:id="@+id/status_text"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:ellipsize="end"
-        android:maxLines="1"
-        android:text="Drive Recorder"
-        android:textColor="#F2F4F8"
-        android:textSize="14sp" />
+    android:background="@color/dvr_background"
+    android:fitsSystemWindows="true">
 
     <LinearLayout
-        android:id="@+id/playback_container"
+        android:id="@+id/list_screen"
         android:layout_width="match_parent"
-        android:layout_height="180dp"
-        android:layout_marginTop="4dp"
-        android:background="#24313C"
+        android:layout_height="match_parent"
         android:orientation="vertical"
-        android:padding="2dp">
+        android:padding="@dimen/dvr_screen_padding">
+
+        <LinearLayout
+            android:id="@+id/list_top_bar"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/dvr_top_bar_height"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/menu_button"
+                android:layout_width="@dimen/dvr_icon_button_size"
+                android:layout_height="@dimen/dvr_icon_button_size"
+                android:enabled="false"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:padding="0dp"
+                android:text="@string/dvr_menu_icon"
+                android:textSize="20sp" />
+
+            <TextView
+                android:id="@+id/list_title"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:text="@string/dvr_list_title"
+                android:textColor="@color/dvr_text_primary"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/filter_button"
+                android:layout_width="@dimen/dvr_icon_button_size"
+                android:layout_height="@dimen/dvr_icon_button_size"
+                android:enabled="false"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:padding="0dp"
+                android:text="@string/dvr_filter_icon"
+                android:textSize="18sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/tab_row"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/dvr_tab_height"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/all_tab"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:minHeight="0dp"
+                android:text="@string/dvr_tab_all"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/protected_tab"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:minHeight="0dp"
+                android:text="@string/dvr_tab_protected"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/event_tab"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:minHeight="0dp"
+                android:text="@string/dvr_tab_event"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/list_body"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="10dp"
+            android:layout_weight="1"
+            android:orientation="horizontal">
+
+            <FrameLayout
+                android:id="@+id/list_content_frame"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@drawable/dvr_panel_background">
+
+                <ScrollView
+                    android:id="@+id/segment_scroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:clipToPadding="false"
+                    android:padding="@dimen/dvr_content_padding">
+
+                    <LinearLayout
+                        android:id="@+id/segment_list"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical" />
+                </ScrollView>
+
+                <TextView
+                    android:id="@+id/empty_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:padding="20dp"
+                    android:text="@string/dvr_empty_loading"
+                    android:textColor="@color/dvr_text_secondary"
+                    android:textSize="16sp"
+                    android:visibility="gone" />
+            </FrameLayout>
+
+            <LinearLayout
+                android:id="@+id/action_rail"
+                android:layout_width="@dimen/dvr_action_rail_width"
+                android:layout_height="match_parent"
+                android:layout_marginStart="10dp"
+                android:background="@drawable/dvr_panel_background"
+                android:gravity="center"
+                android:orientation="vertical"
+                android:padding="8dp">
+
+                <Button
+                    android:id="@+id/play_button"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:enabled="false"
+                    android:minHeight="0dp"
+                    android:text="@string/dvr_action_play"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/protect_button"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_marginTop="8dp"
+                    android:layout_weight="1"
+                    android:enabled="false"
+                    android:minHeight="0dp"
+                    android:text="@string/dvr_action_protect"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/delete_button"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_marginTop="8dp"
+                    android:layout_weight="1"
+                    android:enabled="false"
+                    android:minHeight="0dp"
+                    android:text="@string/dvr_action_delete"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/info_button"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_marginTop="8dp"
+                    android:layout_weight="1"
+                    android:enabled="false"
+                    android:minHeight="0dp"
+                    android:text="@string/dvr_action_info"
+                    android:textSize="13sp" />
+            </LinearLayout>
+        </LinearLayout>
 
         <TextView
-            android:id="@+id/playback_label"
+            android:id="@+id/status_text"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="#A0000000"
-            android:padding="3dp"
-            android:text="Playback Surface"
-            android:textColor="#F2F4F8"
+            android:layout_height="24dp"
+            android:layout_marginTop="6dp"
+            android:ellipsize="end"
+            android:gravity="center_vertical"
+            android:maxLines="1"
+            android:textColor="@color/dvr_text_secondary"
             android:textSize="12sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/playback_screen"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/dvr_background"
+        android:orientation="vertical"
+        android:padding="@dimen/dvr_screen_padding"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/playback_top_bar"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/dvr_top_bar_height"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/back_button"
+                android:layout_width="@dimen/dvr_icon_button_size"
+                android:layout_height="@dimen/dvr_icon_button_size"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:padding="0dp"
+                android:text="@string/dvr_back_icon"
+                android:textSize="22sp" />
+
+            <TextView
+                android:id="@+id/playback_title"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:text="@string/dvr_playback_title"
+                android:textColor="@color/dvr_text_primary"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/playback_datetime"
+                android:layout_width="220dp"
+                android:layout_height="match_parent"
+                android:ellipsize="end"
+                android:gravity="center_vertical|end"
+                android:maxLines="1"
+                android:textColor="@color/dvr_text_secondary"
+                android:textSize="14sp" />
+        </LinearLayout>
 
         <FrameLayout
             android:id="@+id/playback_frame"
             android:layout_width="match_parent"
             android:layout_height="0dp"
+            android:layout_marginTop="10dp"
             android:layout_weight="1"
-            android:background="#000000">
+            android:background="@android:color/black">
 
             <TextureView
                 android:id="@+id/playback_surface"
                 android:layout_width="1dp"
                 android:layout_height="1dp"
-                android:layout_gravity="end|center_vertical"
+                android:layout_gravity="center"
                 android:alpha="0" />
         </FrameLayout>
+
+        <LinearLayout
+            android:id="@+id/seek_row"
+            android:layout_width="match_parent"
+            android:layout_height="38dp"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/current_time_text"
+                android:layout_width="64dp"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:text="@string/dvr_time_zero"
+                android:textColor="@color/dvr_text_primary"
+                android:textSize="14sp" />
+
+            <SeekBar
+                android:id="@+id/playback_seek"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/duration_time_text"
+                android:layout_width="64dp"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:text="@string/dvr_time_zero"
+                android:textColor="@color/dvr_text_primary"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/playback_controls"
+            android:layout_width="match_parent"
+            android:layout_height="76dp"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/rewind_button"
+                android:layout_width="@dimen/dvr_playback_button_size"
+                android:layout_height="@dimen/dvr_playback_button_size"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="@string/dvr_action_rewind"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/play_pause_button"
+                android:layout_width="@dimen/dvr_playback_button_size"
+                android:layout_height="@dimen/dvr_playback_button_size"
+                android:layout_marginStart="24dp"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="@string/dvr_action_pause"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/forward_button"
+                android:layout_width="@dimen/dvr_playback_button_size"
+                android:layout_height="@dimen/dvr_playback_button_size"
+                android:layout_marginStart="24dp"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="@string/dvr_action_forward"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/stop_button"
+                android:layout_width="@dimen/dvr_playback_button_size"
+                android:layout_height="@dimen/dvr_playback_button_size"
+                android:layout_marginStart="24dp"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="@string/dvr_action_stop"
+                android:textSize="13sp" />
+        </LinearLayout>
     </LinearLayout>
-
-    <GridView
-        android:id="@+id/segment_grid"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_marginTop="4dp"
-        android:layout_weight="1"
-        android:background="#182028"
-        android:choiceMode="singleChoice"
-        android:clipToPadding="false"
-        android:columnWidth="168dp"
-        android:gravity="center"
-        android:horizontalSpacing="6dp"
-        android:numColumns="auto_fit"
-        android:padding="6dp"
-        android:stretchMode="columnWidth"
-        android:verticalSpacing="6dp" />
-
-    <TextView
-        android:id="@+id/empty_text"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_marginTop="4dp"
-        android:layout_weight="1"
-        android:background="#182028"
-        android:gravity="center"
-        android:padding="16dp"
-        android:text="No MP4 segments found."
-        android:textColor="#C8D1DA"
-        android:textSize="14sp"
-        android:visibility="gone" />
-
-    <LinearLayout
-        android:id="@+id/action_row_navigation"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/refresh_button"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_weight="1"
-            android:minHeight="0dp"
-            android:padding="2dp"
-            android:text="Refresh"
-            android:textSize="12sp" />
-
-        <Button
-            android:id="@+id/play_button"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_marginStart="4dp"
-            android:layout_weight="1"
-            android:enabled="false"
-            android:minHeight="0dp"
-            android:padding="2dp"
-            android:text="Play"
-            android:textSize="12sp" />
-
-        <Button
-            android:id="@+id/search_recent_button"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_marginStart="4dp"
-            android:layout_weight="1"
-            android:minHeight="0dp"
-            android:padding="2dp"
-            android:text="Recent 1h"
-            android:textSize="12sp" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/action_row_primary"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/protect_button"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_weight="1"
-            android:enabled="false"
-            android:minHeight="0dp"
-            android:padding="2dp"
-            android:text="Protect"
-            android:textSize="12sp" />
-
-        <Button
-            android:id="@+id/unprotect_button"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_marginStart="4dp"
-            android:layout_weight="1"
-            android:enabled="false"
-            android:minHeight="0dp"
-            android:padding="2dp"
-            android:text="Unprotect"
-            android:textSize="12sp" />
-
-        <Button
-            android:id="@+id/delete_button"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_marginStart="4dp"
-            android:layout_weight="1"
-            android:enabled="false"
-            android:minHeight="0dp"
-            android:padding="2dp"
-            android:text="Delete"
-            android:textSize="12sp" />
-
-        <Button
-            android:id="@+id/force_delete_button"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_marginStart="4dp"
-            android:layout_weight="1"
-            android:enabled="false"
-            android:minHeight="0dp"
-            android:padding="2dp"
-            android:text="Force Delete"
-            android:textSize="12sp" />
-    </LinearLayout>
-</LinearLayout>
+</FrameLayout>

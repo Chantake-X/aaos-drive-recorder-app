@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="dvr_background">#101418</color>
+    <color name="dvr_panel">#182028</color>
+    <color name="dvr_panel_high">#24313C</color>
+    <color name="dvr_text_primary">#F2F4F8</color>
+    <color name="dvr_text_secondary">#C8D1DA</color>
+    <color name="dvr_blue">#2E7BEF</color>
+    <color name="dvr_blue_dark">#184E93</color>
+    <color name="dvr_red">#B73232</color>
+</resources>

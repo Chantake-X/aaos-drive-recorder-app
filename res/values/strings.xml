@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Drive Recorder</string>
+    <string name="dvr_list_title">ドライブレコーダー</string>
+    <string name="dvr_playback_title">再生</string>
+    <string name="dvr_menu_icon">☰</string>
+    <string name="dvr_filter_icon">⌕</string>
+    <string name="dvr_back_icon">‹</string>
+    <string name="dvr_tab_all">すべて</string>
+    <string name="dvr_tab_protected">保護済み</string>
+    <string name="dvr_tab_event">イベント</string>
+    <string name="dvr_action_play">▶\n再生</string>
+    <string name="dvr_action_protect">🔒\n保護</string>
+    <string name="dvr_action_unprotect">🔓\n解除</string>
+    <string name="dvr_action_delete">🗑\n削除</string>
+    <string name="dvr_action_info">i\n情報</string>
+    <string name="dvr_action_rewind">⏪\n巻戻し</string>
+    <string name="dvr_action_pause">⏸\n一時停止</string>
+    <string name="dvr_action_resume">▶\n再生</string>
+    <string name="dvr_action_forward">⏩\n早送り</string>
+    <string name="dvr_action_stop">■\n停止</string>
+    <string name="dvr_empty_loading">読み込み中...</string>
+    <string name="dvr_time_zero">00:00</string>
+</resources>
