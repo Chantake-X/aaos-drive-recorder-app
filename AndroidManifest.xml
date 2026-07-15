@@ -1,8 +1,21 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.hailo.driverecorder.app">
+
+    <permission
+        android:name="com.hailo.driverecorder.app.permission.SUBMIT_PERSON_EVENT"
+        android:protectionLevel="signature" />
+    <uses-permission
+        android:name="com.hailo.driverecorder.app.permission.SUBMIT_PERSON_EVENT" />
+
     <application
         android:label="Drive Recorder"
         android:theme="@style/AppTheme">
+        <receiver
+            android:name=".PersonEventReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="com.hailo.driverecorder.app.permission.SUBMIT_PERSON_EVENT" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
